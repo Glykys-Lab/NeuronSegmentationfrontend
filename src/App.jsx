@@ -24,6 +24,7 @@ const DEFAULT_WEBSOCKET_URL =
 const DEFAULT_RESULTS_BUCKET = "amazon-sagemaker-888689904936-us-east-2-c4s3kaz6i9iu5l";
 const DEFAULT_RESULTS_PREFIX = "shared/code/results";
 const POLL_INTERVAL_MS = 15000;
+const ACTIVE_JOB_STATUS_POLL_INTERVAL_MS = 5000;
 const STOPPING_POLL_INTERVAL_MS = 5000;
 const ADMIN_GROUP_NAME = "Admins";
 const THEME_STORAGE_KEY = "neuron-segmentation-theme";
@@ -1119,6 +1120,9 @@ function SegmentationApp({ signOut, user }) {
   const fileInputRef = useRef(null);
   const dragCounterRef = useRef(0);
   const myJobsPollTimeoutRef = useRef(null);
+  const activeJobStatusPollTimeoutRef = useRef(null);
+  const activeJobStatusChecksRef = useRef(new Set());
+  const myJobsRef = useRef([]);
   const jobResultsRef = useRef({});
   const loadingResultsRef = useRef(new Set());
   const loadMyJobsRef = useRef(null);
@@ -1149,6 +1153,10 @@ function SegmentationApp({ signOut, user }) {
   useEffect(() => {
     jobResultsRef.current = jobResults;
   }, [jobResults]);
+
+  useEffect(() => {
+    myJobsRef.current = myJobs;
+  }, [myJobs]);
 
   // Submission confirmations are temporary. Live job status is displayed in
   // the My Jobs cards and refreshed by /my-jobs.
@@ -1429,6 +1437,128 @@ function SegmentationApp({ signOut, user }) {
     // Polling is deliberately restarted after a new job or cancellation.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [signedInAs, isAdminView, myJobsPollGeneration]);
+
+  useEffect(() => {
+    if (isAdminView) {
+      return undefined;
+    }
+
+    let disposed = false;
+
+    const applyPolledJobStatus = (existingJob, statusData) => {
+      const jobId = statusData?.job_id || existingJob?.job_id;
+
+      if (!jobId) {
+        return;
+      }
+
+      const nextStatus =
+        statusData?.status ||
+        statusData?.sagemaker_status ||
+        statusData?.dynamodb_status ||
+        existingJob?.status;
+
+      const nextDynamoStatus =
+        statusData?.dynamodb_status ||
+        nextStatus ||
+        existingJob?.dynamodb_status;
+
+      const updatedJob = {
+        ...existingJob,
+        ...statusData,
+        job_id: jobId,
+        status: nextStatus,
+        dynamodb_status: nextDynamoStatus,
+        started_at:
+          statusData?.started_at ??
+          statusData?.processing_start_time ??
+          existingJob?.started_at,
+        finished_at:
+          statusData?.finished_at ??
+          statusData?.processing_end_time ??
+          existingJob?.finished_at,
+        output_s3: statusData?.output_s3 || existingJob?.output_s3,
+        failure_reason:
+          statusData?.failure_reason ??
+          statusData?.exit_message ??
+          existingJob?.failure_reason,
+        is_active: [
+          ...CANCELABLE_JOB_STATUSES,
+          ...STOPPING_JOB_STATUSES,
+        ].includes(nextDynamoStatus || nextStatus),
+      };
+
+      setMyJobs((previousJobs) =>
+        previousJobs.map((job) =>
+          job.job_id === jobId
+            ? { ...job, ...updatedJob }
+            : job
+        )
+      );
+
+      setMyJobsUpdatedAt(new Date());
+
+      if (isCompletedJob(updatedJob) && updatedJob.output_s3) {
+        void loadResultsForJob(updatedJob);
+      }
+    };
+
+    const pollActiveJobStatuses = async () => {
+      const activeJobs = myJobsRef.current.filter(isActiveJob);
+
+      await Promise.allSettled(
+        activeJobs.map(async (job) => {
+          const jobId = job?.job_id;
+
+          if (
+            !jobId ||
+            activeJobStatusChecksRef.current.has(jobId)
+          ) {
+            return;
+          }
+
+          activeJobStatusChecksRef.current.add(jobId);
+
+          try {
+            const statusData = await checkJobStatus(jobId);
+
+            if (!disposed) {
+              applyPolledJobStatus(job, statusData);
+            }
+          } catch (statusError) {
+            // WebSocket and /my-jobs remain available as fallbacks. Avoid
+            // replacing the whole jobs panel with a temporary polling error.
+            console.warn(
+              `Could not refresh status for ${jobId}:`,
+              statusError
+            );
+          } finally {
+            activeJobStatusChecksRef.current.delete(jobId);
+          }
+        })
+      );
+
+      if (!disposed) {
+        activeJobStatusPollTimeoutRef.current = window.setTimeout(
+          pollActiveJobStatuses,
+          ACTIVE_JOB_STATUS_POLL_INTERVAL_MS
+        );
+      }
+    };
+
+    void pollActiveJobStatuses();
+
+    return () => {
+      disposed = true;
+
+      if (activeJobStatusPollTimeoutRef.current) {
+        window.clearTimeout(activeJobStatusPollTimeoutRef.current);
+        activeJobStatusPollTimeoutRef.current = null;
+      }
+
+      activeJobStatusChecksRef.current.clear();
+    };
+  }, [signedInAs, isAdminView]);
 
   useEffect(() => {
     if (isAdminView || !webSocketUrl) {
