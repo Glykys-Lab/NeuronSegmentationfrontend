@@ -2334,7 +2334,7 @@ function SegmentationApp({ signOut, user }) {
                       ) : hasLoadedResults &&
                         visibleJobResults.length === 0 ? (
                         <div className="status-box">
-                          No files match the selected result option.
+                          The result files are no longer available. They may have expired or been deleted.
                         </div>
                       ) : hasLoadedResults ? (
                         <ul className="results-list">
