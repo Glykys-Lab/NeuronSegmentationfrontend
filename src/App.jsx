@@ -159,12 +159,16 @@ function isPngResult(item) {
   return (item?.key || "").toLowerCase().endsWith(".png");
 }
 
+function isTxtResult(item) {
+  return (item?.key || "").toLowerCase().endsWith(".txt");
+}
+
 function filterResults(files, resultMode) {
   if (resultMode === RESULT_MODE_ZIP_AND_PNG) {
-    return files.filter((item) => isZipResult(item) || isPngResult(item));
+    return files.filter((item) => isZipResult(item) || isPngResult(item)) || isTxtResult(item);
   }
 
-  return files.filter((item) => isZipResult(item));
+  return files.filter((item) => isZipResult(item) || isTxtResult(item));
 }
 
 function getResultDisplayName(key) {
